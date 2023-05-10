@@ -445,6 +445,10 @@ void PreprocessingRecord::MacroDefined(const Token &Id,
                                        const MacroDirective *MD) {
   const MacroInfo *MI = MD->getMacroInfo();
   SourceRange R(MI->getDefinitionLoc(), MI->getDefinitionEndLoc());
+  if (!MI->isBuiltinMacro()) {
+    MD->dump();
+    R.dump(SourceMgr);
+  }
   MacroDefinitionRecord *Def =
       new (*this) MacroDefinitionRecord(Id.getIdentifierInfo(), R);
   addPreprocessedEntity(Def);

@@ -2573,6 +2573,19 @@ void ASTWriter::WritePreprocessorDetail(PreprocessingRecord &PPRec,
 
   SmallVector<PPEntityOffset, 64> PreprocessedEntityOffsets;
 
+  llvm::errs() << "------ SERIALIZING MACROS (";
+  llvm::errs() << PPRec.MacroDefinitions.size();
+  llvm::errs() << ") ------\n";
+  for (auto &I : PPRec.MacroDefinitions) {
+    auto &MI = I.first;
+    if (MI->isBuiltinMacro())
+      continue;
+    MI->dump();
+    llvm::errs() << "\nRANGE: ";
+    SourceRange(MI->getDefinitionLoc(), MI->getDefinitionEndLoc()).dump(PP->getSourceManager());
+  }
+  llvm::errs() << "------\n";
+
   // Enter the preprocessor block.
   Stream.EnterSubblock(PREPROCESSOR_DETAIL_BLOCK_ID, 3);
 
@@ -2593,6 +2606,8 @@ void ASTWriter::WritePreprocessorDetail(PreprocessingRecord &PPRec,
     InclusionAbbrev = Stream.EmitAbbrev(std::move(Abbrev));
   }
 
+  llvm::errs() << "------ SERIALIZING MACRO RANGES -------\n";
+
   unsigned FirstPreprocessorEntityID
     = (Chain ? PPRec.getNumLoadedPreprocessedEntities() : 0)
     + NUM_PREDEF_PP_ENTITY_IDS;
@@ -2610,6 +2625,9 @@ void ASTWriter::WritePreprocessorDetail(PreprocessingRecord &PPRec,
         PPEntityOffset(getAdjustedRange((*E)->getSourceRange()), Offset));
 
     if (auto *MD = dyn_cast<MacroDefinitionRecord>(*E)) {
+      llvm::errs() << "RANGE: ";
+      MD->getSourceRange().dump(PP->getSourceManager());
+
       // Record this macro definition's ID.
       MacroDefinitions[MD] = NextPreprocessorEntityID;
 
@@ -2647,6 +2665,10 @@ void ASTWriter::WritePreprocessorDetail(PreprocessingRecord &PPRec,
     llvm_unreachable("Unhandled PreprocessedEntity in ASTWriter");
   }
   Stream.ExitBlock();
+
+  llvm::errs() << "---- WROTE ";
+  llvm::errs() << MacroDefinitions.size();
+  llvm::errs() << " MACROS\n";
 
   // Write the offsets table for the preprocessing record.
   if (NumPreprocessingRecords > 0) {
