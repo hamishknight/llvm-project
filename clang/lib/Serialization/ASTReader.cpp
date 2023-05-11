@@ -6223,6 +6223,32 @@ PreprocessedEntityID ASTReader::findPreprocessedEntity(SourceLocation Loc,
   pp_iterator pp_begin = M.PreprocessedEntityOffsets;
   pp_iterator pp_end = pp_begin + M.NumPreprocessedEntities;
 
+  llvm::errs() << "------- SEARCHING OFFSETS ---------\n";
+  llvm::errs() << "TARGET: " << Loc.ID << "\n";
+  llvm::errs() << "-------------\n";
+  for (auto I = pp_begin; I != pp_end; ++I) {
+    auto Offs = *I;
+    auto B = TranslateSourceLocation(M, Offs.getBegin());
+    auto E = TranslateSourceLocation(M, Offs.getEnd());
+    SourceRange R(B, E);
+    llvm::errs() << "BEGIN: " << B.ID << "\n";
+    llvm::errs() << "END: " << E.ID << "\n";
+    llvm::errs() << "RANGE: ";
+    R.dump(SourceMgr);
+    llvm::errs() << "-------------\n";
+  }
+
+//  pp_iterator _pp_begin = M.PreprocessedEntityOffsets;
+//  pp_iterator _pp_end = _pp_begin + M.NumPreprocessedEntities;
+//
+//  std::vector<PPEntityOffset> offsets(_pp_begin, _pp_end);
+//  std::sort(offsets.begin(), offsets.end(), PPEntityComp(*this, M));
+//  assert(std::is_sorted(offsets.begin(), offsets.end(), PPEntityComp(*this, M)));
+//  ArrayRef<PPEntityOffset> offsetsRef(offsets);
+//
+//  pp_iterator pp_begin = offsetsRef.begin();
+//  pp_iterator pp_end = offsetsRef.end();
+
   size_t Count = M.NumPreprocessedEntities;
   size_t Half;
   pp_iterator First = pp_begin;

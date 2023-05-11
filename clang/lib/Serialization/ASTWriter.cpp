@@ -2619,6 +2619,10 @@ void ASTWriter::WritePreprocessorDetail(PreprocessingRecord &PPRec,
        (void)++E, ++NumPreprocessingRecords, ++NextPreprocessorEntityID) {
     Record.clear();
 
+    if ((*E)->getSourceRange().getBegin().isInvalid() ||
+        PP->getSourceManager().getFileID((*E)->getSourceRange().getBegin()) == PP->getPredefinesFileID())
+      continue;
+
     uint64_t Offset = Stream.GetCurrentBitNo() - MacroOffsetsBase;
     assert((Offset >> 32) == 0 && "Preprocessed entity offset too large");
     PreprocessedEntityOffsets.push_back(
@@ -2671,8 +2675,8 @@ void ASTWriter::WritePreprocessorDetail(PreprocessingRecord &PPRec,
   llvm::errs() << " MACROS\n";
 
   // Write the offsets table for the preprocessing record.
-  if (NumPreprocessingRecords > 0) {
-    assert(PreprocessedEntityOffsets.size() == NumPreprocessingRecords);
+  if (PreprocessedEntityOffsets.size() > 0) {
+//    assert(PreprocessedEntityOffsets.size() == NumPreprocessingRecords);
 
     // Write the offsets table for identifier IDs.
     using namespace llvm;
