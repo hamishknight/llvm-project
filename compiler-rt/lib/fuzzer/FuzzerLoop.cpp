@@ -295,15 +295,6 @@ void Fuzzer::AlarmCallback() {
     if (EF->__sanitizer_acquire_crash_state &&
         !EF->__sanitizer_acquire_crash_state())
       return;
-    Printf("ALARM: working on the last Unit for %zd seconds\n", Seconds);
-    Printf("       and the timeout value is %d (use -timeout=N to change)\n",
-           Options.UnitTimeoutSec);
-    DumpCurrentUnit("timeout-");
-    Printf("==%lu== ERROR: libFuzzer: timeout after %zu seconds\n", GetPid(),
-           Seconds);
-    PrintStackTrace();
-    Printf("SUMMARY: libFuzzer: timeout\n");
-    PrintFinalStats();
     _Exit(Options.TimeoutExitCode); // Stop right now.
   }
 }
