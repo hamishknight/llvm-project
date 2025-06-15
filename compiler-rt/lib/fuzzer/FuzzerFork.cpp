@@ -106,6 +106,7 @@ struct GlobalEnv {
   size_t NumOOMs = 0;
   size_t NumCrashes = 0;
 
+  std::mutex Mtx;
 
   size_t NumRuns = 0;
 
@@ -300,10 +301,88 @@ struct JobQueue {
   }
 };
 
-void WorkerThread(JobQueue *FuzzQ, JobQueue *MergeQ) {
+static void DoMerge(FuzzJob *Job, GlobalEnv *Env) {
+  auto Stats = ParseFinalStatsFromLog(Job->LogPath);
+  {
+    std::lock_guard<std::mutex> Lock(Env->Mtx);
+    Env->NumRuns += Stats.number_of_executed_units;
+  }
+
+  std::vector<SizedFile> TempFiles, MergeCandidates;
+  // Read all newly created inputs and their feature sets.
+  // Choose only those inputs that have new features.
+  GetSizedFilesFromDir(Job->CorpusDir, &TempFiles);
+  std::sort(TempFiles.begin(), TempFiles.end());
+  for (auto &F : TempFiles) {
+    auto FeatureFile = F.File;
+    FeatureFile.replace(0, Job->CorpusDir.size(), Job->FeaturesDir);
+    auto FeatureBytes = FileToVector(FeatureFile, 0, false);
+    assert((FeatureBytes.size() % sizeof(uint32_t)) == 0);
+    std::vector<uint32_t> NewFeatures(FeatureBytes.size() / sizeof(uint32_t));
+    memcpy(NewFeatures.data(), FeatureBytes.data(), FeatureBytes.size());
+    {
+      std::lock_guard<std::mutex> Lock(Env->Mtx);
+      for (auto Ft : NewFeatures) {
+        if (!Env->Features.count(Ft)) {
+          MergeCandidates.push_back(F);
+          break;
+        }
+      }
+    }
+  }
+
+  {
+    std::lock_guard<std::mutex> Lock(Env->Mtx);
+    Printf("#%zd: cov: %zd ft: %zd corp: %zd exec/s: %zd "
+           "oom/timeout/crash: %zd/%zd/%zd time: %zds job: %zd dft_time: %d\n",
+           Env->NumRuns, Env->Cov.size(), Env->Features.size(), Env->Files.size(),
+           Stats.average_exec_per_sec, Env->NumOOMs, Env->NumTimeouts, Env->NumCrashes,
+           Env->secondsSinceProcessStartUp(), Job->JobId, Job->DftTimeInSeconds);
+  }
+
+  if (MergeCandidates.empty()) return;
+
+  std::vector<std::string> Args;
+  std::set<uint32_t> Features, Cov;
+  {
+    std::lock_guard<std::mutex> Lock(Env->Mtx);
+    Args = Env->Args;
+    Features = Env->Features;
+    Cov = Env->Cov;
+  }
+
+  std::vector<std::string> FilesToAdd;
+  std::set<uint32_t> NewFeatures, NewCov;
+  bool IsSetCoverMerge = !Job->Cmd.getFlagValue("set_cover_merge").compare("1");
+  CrashResistantMerge(Args, {}, MergeCandidates, &FilesToAdd, Features,
+                      &NewFeatures, Cov, &NewCov, Job->CFPath, false,
+                      IsSetCoverMerge);
+
+  {
+    std::lock_guard<std::mutex> Lock(Env->Mtx);
+    for (auto &Path : FilesToAdd) {
+      auto U = FileToVector(Path);
+      auto NewPath = DirPlusFile(Env->MainCorpusDir, Hash(U));
+      if (!FileSize(NewPath)) {
+        WriteToFile(U, NewPath);
+        Env->Files.push_back(NewPath);
+      }
+    }
+    Env->Features.insert(NewFeatures.begin(), NewFeatures.end());
+    Env->Cov.insert(NewCov.begin(), NewCov.end());
+  }
+  for (auto Idx : NewCov)
+    if (auto *TE = TPC.PCTableEntryByIdx(Idx))
+      if (TPC.PcIsFuncEntry(TE))
+        PrintPC("  NEW_FUNC: %p %F %L\n", "",
+                TPC.GetNextInstructionPc(TE->PC));
+}
+
+void WorkerThread(JobQueue *FuzzQ, JobQueue *MergeQ, GlobalEnv *Env) {
   while (auto Job = FuzzQ->Pop()) {
     // Printf("WorkerThread: job %p\n", Job);
     Job->ExitCode = ExecuteCommand(Job->Cmd);
+    DoMerge(Job, Env);
     MergeQ->Push(Job);
   }
 }
@@ -372,12 +451,11 @@ void FuzzWithFork(Random &Rand, const FuzzingOptions &Options,
     WriteToFile(Unit({1}), Env.StopFile());
   };
 
-  size_t MergeCycle = 20;
-  size_t JobExecuted = 0;
   size_t JobId = 1;
   std::vector<std::thread> Threads;
   for (int t = 0; t < NumJobs; t++) {
-    Threads.push_back(std::thread(WorkerThread, &FuzzQ, &MergeQ));
+    Threads.push_back(std::thread(WorkerThread, &FuzzQ, &MergeQ, &Env));
+    std::lock_guard<std::mutex> Lock(Env.Mtx);
     FuzzQ.Push(Env.CreateNewJob(JobId++));
   }
 
@@ -393,30 +471,7 @@ void FuzzWithFork(Random &Rand, const FuzzingOptions &Options,
     }
     Fuzzer::MaybeExitGracefully();
 
-    Env.RunOneMergeJob(Job.get());
-
-    // merge the corpus .
-    JobExecuted++;
-    if (Env.Group && JobExecuted >= MergeCycle) {
-      std::vector<SizedFile> CurrentSeedFiles;
-      for (auto &Dir : CorpusDirs)
-        GetSizedFilesFromDir(Dir, &CurrentSeedFiles);
-      std::sort(CurrentSeedFiles.begin(), CurrentSeedFiles.end());
-
-      auto CFPath = DirPlusFile(Env.TempDir, "merge.txt");
-      std::set<uint32_t> TmpNewFeatures, TmpNewCov;
-      std::set<uint32_t> TmpFeatures, TmpCov;
-      Env.Files.clear();
-      Env.FilesSizes.clear();
-      CrashResistantMerge(Env.Args, {}, CurrentSeedFiles, &Env.Files,
-                          TmpFeatures, &TmpNewFeatures, TmpCov, &TmpNewCov,
-                          CFPath, /*Verbose=*/false, /*IsSetCoverMerge=*/false);
-      for (auto &path : Env.Files)
-        Env.FilesSizes.push_back(FileSize(path));
-      RemoveFile(CFPath);
-      JobExecuted = 0;
-      MergeCycle += 5;
-    }
+    std::lock_guard<std::mutex> Lock(Env.Mtx);
 
     // Since the number of corpus seeds will gradually increase, in order to
     // control the number in each group to be about three times the number of
