@@ -278,19 +278,31 @@ struct GlobalEnv {
 
 };
 
-struct JobQueue {
-  std::queue<FuzzJob *> Qu;
+struct InitialMergeJob {
+  size_t Id;
+  std::vector<SizedFile> Files;
+  std::vector<std::string> NewFiles;
+  std::set<uint32_t> Features;
+  std::set<uint32_t> Cov;
+
+  InitialMergeJob(size_t Id, std::vector<SizedFile> Files)
+    : Id(Id), Files(std::move(Files)) {}
+};
+
+template<typename T>
+struct Queue {
+  std::queue<T *> Qu;
   std::mutex Mu;
   std::condition_variable Cv;
 
-  void Push(FuzzJob *Job) {
+  void Push(T *Job) {
     {
       std::lock_guard<std::mutex> Lock(Mu);
       Qu.push(Job);
     }
     Cv.notify_one();
   }
-  FuzzJob *Pop() {
+  T *Pop() {
     std::unique_lock<std::mutex> Lk(Mu);
     // std::lock_guard<std::mutex> Lock(Mu);
     Cv.wait(Lk, [&]{return !Qu.empty();});
@@ -300,6 +312,27 @@ struct JobQueue {
     return Job;
   }
 };
+
+using JobQueue = Queue<FuzzJob>;
+
+void InitialMergeThread(Queue<InitialMergeJob> *JobQueue,
+                        Queue<InitialMergeJob> *OutQueue,
+                        GlobalEnv *Env) {
+  while (auto Job = JobQueue->Pop()) {
+    std::string CFPath;
+    std::vector<std::string> Args;
+    {
+      std::lock_guard<std::mutex> Lock(Env->Mtx);
+      CFPath = DirPlusFile(Env->TempDir, "initial_merge" + std::to_string(Job->Id) + ".txt");
+      Args = Env->Args;
+    }
+    CrashResistantMerge(Args, {}, Job->Files, &Job->NewFiles, {},
+                        &Job->Features, {}, &Job->Cov, CFPath,
+                        /*Verbose=*/false, /*IsSetCoverMerge=*/false);
+    RemoveFile(CFPath);
+    OutQueue->Push(Job);
+  }
+}
 
 static void DoMerge(FuzzJob *Job, GlobalEnv *Env) {
   auto Stats = ParseFinalStatsFromLog(Job->LogPath);
@@ -421,15 +454,34 @@ void FuzzWithFork(Random &Rand, const FuzzingOptions &Options,
   if (Options.KeepSeed) {
     for (auto &File : SeedFiles)
       Env.Files.push_back(File.File);
-  } else {
-    auto CFPath = DirPlusFile(Env.TempDir, "merge.txt");
-    std::set<uint32_t> NewFeatures, NewCov;
-    CrashResistantMerge(Env.Args, {}, SeedFiles, &Env.Files, Env.Features,
-                        &NewFeatures, Env.Cov, &NewCov, CFPath,
-                        /*Verbose=*/false, /*IsSetCoverMerge=*/false);
-    Env.Features.insert(NewFeatures.begin(), NewFeatures.end());
-    Env.Cov.insert(NewCov.begin(), NewCov.end());
-    RemoveFile(CFPath);
+  } else if (SeedFiles.size() > 0) {
+    Queue<InitialMergeJob> JobQ, ReturnQ;
+
+    std::vector<std::thread> Threads;
+    for (int t = 0; t < NumJobs; t++)
+      Threads.push_back(std::thread(InitialMergeThread, &JobQ, &ReturnQ, &Env));
+
+    size_t JobId = 0;
+    auto BatchSize = std::max(SeedFiles.size() / (NumJobs * 16), (size_t)1);
+    for (size_t i = 0; i < SeedFiles.size(); i += BatchSize) {
+      std::vector<SizedFile> MergeFiles;
+      for (size_t j = i; j < (i + BatchSize) && j < SeedFiles.size(); j++)
+        MergeFiles.push_back(SeedFiles[j]);
+      JobQ.Push(new InitialMergeJob(JobId++, std::move(MergeFiles)));
+    }
+
+    for (size_t i = 0; i < JobId; i++) {
+      std::unique_ptr<InitialMergeJob> Job(ReturnQ.Pop());
+      std::lock_guard<std::mutex> Lock(Env.Mtx);
+      Env.Features.insert(Job->Features.begin(), Job->Features.end());
+      Env.Cov.insert(Job->Cov.begin(), Job->Cov.end());
+      for (auto &File : Job->NewFiles)
+        Env.Files.push_back(File);
+    }
+    for (size_t i = 0; i < Threads.size(); i++)
+      JobQ.Push(nullptr);
+    for (auto &T : Threads)
+      T.join();
   }
 
   if (Env.Group) {
