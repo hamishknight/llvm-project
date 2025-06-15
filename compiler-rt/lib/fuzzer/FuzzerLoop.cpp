@@ -300,9 +300,16 @@ void Fuzzer::AlarmCallback() {
 }
 
 void Fuzzer::RssLimitCallback() {
+  // Only user code is memory-limited. Check this before taking the crash
+  // state: once taken it stays taken, and every later crash, timeout and OOM
+  // report would return early.
+  if (!RunningUserCallback)
+    return;
   if (EF->__sanitizer_acquire_crash_state &&
       !EF->__sanitizer_acquire_crash_state())
     return;
+  if (!RunningUserCallback)
+    return; // We have not started running units yet.
   Printf("==%lu== ERROR: libFuzzer: out-of-memory (used: %zdMb; limit: %dMb)\n",
          GetPid(), GetPeakRSSMb(), Options.RssLimitMb);
   Printf("   To change the out-of-memory limit use -rss_limit_mb=<N>\n\n");

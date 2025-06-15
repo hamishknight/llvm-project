@@ -16,6 +16,7 @@
 #include <chrono>
 #include <cstring>
 #include <errno.h>
+#include <fcntl.h>
 #include <iomanip>
 #include <signal.h>
 #include <stdio.h>
@@ -148,7 +149,40 @@ void SleepSeconds(int Seconds) {
 
 unsigned long GetPid() { return (unsigned long)getpid(); }
 
+#if LIBFUZZER_LINUX
+// Returns VmHWM from /proc/self/status in KiB, or 0 if it can't be read.
+// Avoids stdio and malloc: crash handlers reach this through PrintFinalStats().
+static size_t GetVmHWMKb() {
+  int Fd = open("/proc/self/status", O_RDONLY | O_CLOEXEC);
+  if (Fd < 0)
+    return 0;
+  char Buf[4096];
+  ssize_t Len = read(Fd, Buf, sizeof(Buf) - 1);
+  close(Fd);
+  if (Len <= 0)
+    return 0;
+  Buf[Len] = 0;
+  static const char Key[] = "\nVmHWM:";
+  const char *P = strstr(Buf, Key);
+  if (!P)
+    return 0;
+  P += sizeof(Key) - 1;
+  while (*P == ' ' || *P == '\t')
+    P++;
+  size_t Kb = 0;
+  for (; *P >= '0' && *P <= '9'; P++)
+    Kb = Kb * 10 + (*P - '0');
+  return Kb;
+}
+#endif
+
 size_t GetPeakRSSMb() {
+#if LIBFUZZER_LINUX
+  // ru_maxrss survives execve(), so a fork-mode job started by a large parent
+  // would report the parent's peak. VmHWM covers only this process image.
+  if (size_t Kb = GetVmHWMKb())
+    return Kb >> 10;
+#endif
   struct rusage usage;
   if (getrusage(RUSAGE_SELF, &usage))
     return 0;
